@@ -28,7 +28,8 @@ class CrowdedCentroidTask(pipeBase.Task):
     _DefaultName = "crowdedCentroidTask"
 
     def __init__(self, schema, **kwargs):
-        pipeBase.CmdLineTask.__init__(self, **kwargs)
+        # pipeBase.CmdLineTask.__init__(self, **kwargs)
+        super().__init__(**kwargs)
         self.centroid_control = SdssCentroidControl()
         self.sdssCentroid = SdssCentroidAlgorithm(self.centroid_control,
                                                   "centroid",
@@ -64,10 +65,3 @@ class CrowdedCentroidTask(pipeBase.Task):
                     self.sdssCentroid.measure(source, subtracted_exposure)
                 except (MeasurementError):
                     pass
-
-
-
-
-
-
-

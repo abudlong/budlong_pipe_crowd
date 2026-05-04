@@ -6,7 +6,7 @@ import lsst.pipe.base as pipeBase
 import lsst.afw.table as afwTable
 import lsst.afw.image as afwImage
 from lsst.meas.algorithms import SourceDetectionTask, SourceDetectionConfig
-from lsst.pipe.base import ArgumentParser
+# from lsst.pipe.base import ArgumentParser
 import lsst.pipe.base.connectionTypes as cT
 from lsst.utils.timer import timeMethod
 
@@ -24,7 +24,8 @@ class CrowdedFieldConnections(pipeBase.PipelineTaskConnections, dimensions=("ins
 
     calexp = cT.Input(
         doc="Input image to measure.",
-        name="calexp",
+        # name="calexp",
+        name="visit_image",
         storageClass="ExposureF",
         dimensions=("instrument", "visit", "detector"),
     )

@@ -7,7 +7,7 @@ import pickle
 import glob
 from astropy.io import ascii
 
-from lsst.daf.persistence import Butler
+from lsst.daf.butler import Butler
 
 from astropy.io import fits
 from astropy.table import Table
@@ -260,7 +260,3 @@ class MakeSummaryPlots:
 
         ax.set_ylim(0, 1.1)
         plt.savefig("all_visit_completness.pdf")
-
-
-
-

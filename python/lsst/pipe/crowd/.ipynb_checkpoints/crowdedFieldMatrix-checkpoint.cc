@@ -1,0 +1,60 @@
+
+#include <Eigen/Sparse>
+#include <vector>
+
+#include "pybind11/pybind11.h"
+#include "ndarray/pybind11.h"
+#include "pybind11/stl.h"
+#include "pybind11/eigen.h"
+
+#include "lsst/afw/table.h"
+#include "lsst/afw/table/io/python.h"
+#include "lsst/pipe/crowd/CrowdedFieldMatrix.h"
+
+namespace py = pybind11;
+using namespace pybind11::literals;
+
+namespace lsst {
+namespace pipe {
+namespace crowd {
+
+PYBIND11_MODULE(crowdedFieldMatrix, mod) {
+
+    py::class_<CrowdedFieldMatrix<float>, std::shared_ptr<CrowdedFieldMatrix<float>>>
+            clsCrowdedFieldMatrix(mod, "CrowdedFieldMatrix");
+
+    clsCrowdedFieldMatrix.def(py::init<const afw::image::Exposure<float> &,
+                                       ndarray::Array<double const, 1> &,
+                                        ndarray::Array<double const, 1> &>(),
+                              "exposure"_a, "x"_a, "y"_a);
+
+    clsCrowdedFieldMatrix.def(py::init<const afw::image::Exposure<float> &,
+                                       afw::table::SourceCatalog *,
+                                       afw::table::Key<double>,
+                                       bool,
+                                       afw::table::PointKey<double>>(),
+                              "exposure"_a, "sourceCatalog"_a, "fluxKey"_a, "fitCentroids"_a=false,
+                              "centroidKey"_a=afw::table::PointKey<double>());
+
+    clsCrowdedFieldMatrix.def("_addSource", &CrowdedFieldMatrix<float>::_addSource);
+
+    clsCrowdedFieldMatrix.def("solve", &CrowdedFieldMatrix<float>::solve);
+    clsCrowdedFieldMatrix.def("result", &CrowdedFieldMatrix<float>::result);
+
+    clsCrowdedFieldMatrix.def("getMatrixEntries", &CrowdedFieldMatrix<float>::getMatrixEntries);
+    clsCrowdedFieldMatrix.def("getDataVector", &CrowdedFieldMatrix<float>::getDataVector);
+
+
+    py::enum_<SolverStatus>(clsCrowdedFieldMatrix, "SolverStatus")
+        .value("SUCCESS", SolverStatus::SUCCESS)
+        .value("FAILURE", SolverStatus::FAILURE)
+        .export_values();
+
+
+    // debugging
+    clsCrowdedFieldMatrix.def("_getParameterMapping", &CrowdedFieldMatrix<float>::getParameterMapping);
+    clsCrowdedFieldMatrix.def("_getPixelMapping", &CrowdedFieldMatrix<float>::getPixelMapping);
+}
+}
+}
+}
