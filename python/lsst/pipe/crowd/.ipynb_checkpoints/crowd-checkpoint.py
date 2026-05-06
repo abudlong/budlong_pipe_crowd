@@ -127,6 +127,8 @@ class CrowdedFieldTask(pipeBase.PipelineTask):
         self.makeSubtask("detection", schema=self.schema)
         self.makeSubtask("centroid", schema=self.schema)
         self.makeSubtask("modelImageTask")
+        # Add to fix `Field with name 'coord_raErr' not found with type 'F'.`
+        afwTable.CoordKey.addErrorFields(self.schema)
 
     def runQuantum(self, butlerQC, inputRefs, outputRefs):
         inputs = butlerQC.get(inputRefs)
