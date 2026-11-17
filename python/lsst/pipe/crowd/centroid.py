@@ -14,6 +14,7 @@ from lsst.meas.base import SdssCentroidAlgorithm, SdssCentroidControl
 from lsst.meas.base import MeasurementError
 
 from .modelImage import ModelImageTask
+from .timing import NullTimer
 
 class CrowdedCentroidTaskConfig(pexConfig.Config):
     """Config for CrowdedCentroidTask"""
@@ -35,13 +36,20 @@ class CrowdedCentroidTask(pipeBase.Task):
                                                   "centroid",
                                                   schema)
         self.makeSubtask("modelImage")
+        # CrowdedFieldTask replaces this with its own StepTimer.
+        self.timer = NullTimer()
 
     @timeMethod
-    def run(self, exposure, catalog, flux_key):
+    def run(self, exposure, catalog, flux_key, outer=-1):
 
-        subtracted_exposure = afwImage.ExposureF(exposure, deep=True)
-        model = self.modelImage.run(subtracted_exposure, catalog, flux_key)
+        with self.timer.step("centroid: model image + subtract", outer=outer, nSources=len(catalog)):
+            subtracted_exposure = afwImage.ExposureF(exposure, deep=True)
+            model = self.modelImage.run(subtracted_exposure, catalog, flux_key)
 
+        with self.timer.step("centroid: per-source SdssCentroid", outer=outer, nSources=len(catalog)):
+            self._measureCentroids(subtracted_exposure, catalog, flux_key)
+
+    def _measureCentroids(self, subtracted_exposure, catalog, flux_key):
         for source in catalog:
             with self.modelImage.replaced_source(subtracted_exposure,
                                                  source, flux_key):

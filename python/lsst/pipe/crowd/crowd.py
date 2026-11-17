@@ -16,6 +16,7 @@ from scipy.spatial import cKDTree
 from .crowdedFieldMatrix import CrowdedFieldMatrix
 from .modelImage import ModelImageTask, ModelImageTaskConfig
 from .centroid import CrowdedCentroidTask, CrowdedCentroidTaskConfig
+from .timing import StepTimer
 
 
 class CrowdedFieldConnections(pipeBase.PipelineTaskConnections, dimensions=("instrument", "visit",
@@ -112,6 +113,14 @@ class CrowdedFieldTask(pipeBase.PipelineTask):
 
     def __init__(self, **kwargs):
         pipeBase.PipelineTask.__init__(self, **kwargs)
+        # Step timings go into this task's metadata; see timing.py.
+        self.timer = StepTimer(self.metadata, log=self.log)
+        with self.timer.step("task setup (schema + subtasks)", kind="setup"):
+            self._setup()
+        # The centroid subtask records its sub-steps into the same table.
+        self.centroid.timer = self.timer
+
+    def _setup(self):
         self.schema = afwTable.SourceTable.makeMinimalSchema()
         self.simultaneousPsfFlux_key = self.schema.addField(
             "crowd_psfFlux_flux_instFlux", type=np.float64,
@@ -131,20 +140,67 @@ class CrowdedFieldTask(pipeBase.PipelineTask):
         afwTable.CoordKey.addErrorFields(self.schema)
 
     def runQuantum(self, butlerQC, inputRefs, outputRefs):
-        inputs = butlerQC.get(inputRefs)
-        outputs = self.run(inputs['calexp'])
-        if(outputs is not None):
-            butlerQC.put(outputs, outputRefs)
+        timer = self.timer
+        with timer.step("runQuantum (total)", kind="wall"):
+            with timer.step("read input: calexp", kind="io"):
+                inputs = butlerQC.get(inputRefs)
+            outputs = self.run(inputs['calexp'])
+            if(outputs is not None):
+                # Write each output separately so each file gets its own timing.
+                for name, ref in outputRefs:
+                    with timer.step(f"write output: {name}", kind="io"):
+                        butlerQC.put(getattr(outputs, name), ref)
 
     @timeMethod
     def run(self, exposure):
+        with self.timer.step("run (total)", kind="wall"):
+            return self._run(exposure)
 
+    def _run(self, exposure):
+        timer = self.timer
         source_catalog = afwTable.SourceCatalog(self.schema)
 
         for detection_round in range(1, self.config.num_iterations + 1):
+            with timer.step("detection round (total)", outer=detection_round, kind="wall") as rec:
+                result = self._runIteration(exposure, source_catalog, detection_round)
+                rec["nSources"] = len(result) if result is not None else -1
+            if result is None:
+                return None
+            source_catalog = result
 
-            detection_catalog = afwTable.SourceCatalog(self.schema)
-            if(len(source_catalog) > 0):
+        self.log.info("Final source catalog length: %d", len(source_catalog))
+
+        n = len(source_catalog)
+        with timer.step("final: sky coordinates", nSources=n):
+            # Fill-in coord_ra/coord_dec
+            afwTable.updateSourceCoords(exposure.getWcs(), sourceList=source_catalog)
+
+        with timer.step("final: model image + subtract", nSources=n):
+            # Subtract in-place
+            model_image = self.modelImageTask.run(exposure, source_catalog,
+                                                  self.simultaneousPsfFlux_key)
+
+            model_exposure = afwImage.ExposureF(model_image, wcs=exposure.getWcs())
+
+        return pipeBase.Struct(crowdedFieldCat=source_catalog,
+                               crowdedFieldResidual=exposure,
+                               crowdedFieldModel=model_exposure)
+
+    def _runIteration(self, exposure, source_catalog, detection_round):
+        """Run one detect / fit / centroid / re-fit round.
+
+        Each stage is timed with ``self.timer``; see timing.py for where
+        the durations are recorded.
+
+        Returns the updated source catalog, or `None` if the first
+        matrix solve failed.
+        """
+        timer = self.timer
+        r = detection_round
+        detection_catalog = afwTable.SourceCatalog(self.schema)
+
+        if(len(source_catalog) > 0):
+            with timer.step("model image + subtract", outer=r, nSources=len(source_catalog)):
                 residual_exposure = afwImage.ExposureF(exposure, deep=True)
 
                 # This subtracts the model from its input in place.
@@ -153,20 +209,25 @@ class CrowdedFieldTask(pipeBase.PipelineTask):
                                                       source_catalog,
                                                       self.simultaneousPsfFlux_key)
 
+            with timer.step("convolve model with PSF", outer=r):
                 model_convolution = self.detection.convolveImage(model_image,
-                                                                        exposure.getPsf(),
-                                                                        doSmooth=True)
+                                                                 exposure.getPsf(),
+                                                                 doSmooth=True)
                 # .middle refers to only the inside area of the convolved image,
                 # away from edges, having meaningful data.
                 model_significance_image = model_convolution.middle
 
-            else:
-                residual_exposure = exposure
-                model_image = None
-                model_significance_image = None
+        else:
+            residual_exposure = exposure
+            model_image = None
+            model_significance_image = None
 
+        with timer.step("detection", outer=r) as rec:
             detRes = self.detection.run(detection_catalog, residual_exposure)
+            rec["nSources"] = sum(len(src.getFootprint().peaks) for src in detRes.sources)
 
+        nBefore = len(source_catalog)
+        with timer.step("peak filtering (new sources)", outer=r) as rec:
             for source in detRes.sources:
                 for peak in source.getFootprint().peaks:
 
@@ -182,28 +243,34 @@ class CrowdedFieldTask(pipeBase.PipelineTask):
                     child['coarse_centroid_x'] = peak.getFx()
                     child['coarse_centroid_y'] = peak.getFy()
 
-            self.log.info("Source catalog length after detection round %d: %d",
-                          detection_round, len(source_catalog))
+            rec["nSources"] = len(source_catalog) - nBefore
 
+        self.log.info("Source catalog length after detection round %d: %d",
+                      detection_round, len(source_catalog))
+
+        with timer.step("matrix build (fit 1)", outer=r, nSources=len(source_catalog)):
             solver_matrix = CrowdedFieldMatrix(exposure, source_catalog,
                                                self.simultaneousPsfFlux_key)
 
+        with timer.step("matrix solve (fit 1)", outer=r, nSources=len(source_catalog)):
             status = solver_matrix.solve()
-            if(status != solver_matrix.SUCCESS):
-                self.log.error(f"Matrix solution failed on iteration {detection_round} solve 1")
-                return None
+        if(status != solver_matrix.SUCCESS):
+            self.log.error(f"Matrix solution failed on iteration {detection_round} solve 1")
+            return None
 
-            source_catalog.schema.getAliasMap().set("slot_Centroid",
-                                                    "coarse_centroid")
+        source_catalog.schema.getAliasMap().set("slot_Centroid",
+                                                "coarse_centroid")
 
+        with timer.step("centroid (total)", outer=r, kind="wall", nSources=len(source_catalog)):
             self.centroid.run(exposure, source_catalog,
-                         self.simultaneousPsfFlux_key)
+                              self.simultaneousPsfFlux_key, outer=r)
 
-            # Move the centroid slot from the coarse peak values to the
-            # SdssCentroid values.
-            source_catalog.schema.getAliasMap().set("slot_Centroid",
-                                                    "centroid")
+        # Move the centroid slot from the coarse peak values to the
+        # SdssCentroid values.
+        source_catalog.schema.getAliasMap().set("slot_Centroid",
+                                                "centroid")
 
+        with timer.step("drop NaN / close-pair sources", outer=r) as rec:
             # Sometimes centroiding results in nans, which break cKDTree
             for n in range(len(source_catalog))[::-1]:
                 if((not np.isfinite(source_catalog[n]['centroid_x'])) or
@@ -234,30 +301,17 @@ class CrowdedFieldTask(pipeBase.PipelineTask):
                 remaining_pairs = set(j for (i,j) in centroid_tree.query_pairs(self.config.minCentroidSeparation))
                 if(len(remaining_pairs) > 0):
                     self.log.warn("Close-pairs remain after filtering: " +  ", ".join(f"{x:d}" for x in remaining_pairs))
+            rec["nSources"] = len(source_catalog)
 
-            # Now that we have more precise centroids, re-fit the fluxes
+        # Now that we have more precise centroids, re-fit the fluxes
+        with timer.step("matrix build (fit 2)", outer=r, nSources=len(source_catalog)):
             solver_matrix = CrowdedFieldMatrix(exposure, source_catalog,
                                                self.simultaneousPsfFlux_key)
 
+        with timer.step("matrix solve (fit 2)", outer=r, nSources=len(source_catalog)):
             status = solver_matrix.solve()
-            if(status != solver_matrix.SUCCESS):
-                self.log.error(f"Matrix solution failed on iteration {detection_round} solve 2")
-                raise RuntimeError(f"Matrix solution failed on iteration {detection_round} solve 2")
-                return None
+        if(status != solver_matrix.SUCCESS):
+            self.log.error(f"Matrix solution failed on iteration {detection_round} solve 2")
+            raise RuntimeError(f"Matrix solution failed on iteration {detection_round} solve 2")
 
-        self.log.info("Final source catalog length: %d", len(source_catalog))
-
-        # Fill-in coord_ra/coord_dec
-        afwTable.updateSourceCoords(exposure.getWcs(), sourceList=source_catalog)
-
-        # Subtract in-place
-        model_image = self.modelImageTask.run(exposure, source_catalog,
-                                              self.simultaneousPsfFlux_key)
-
-        model_exposure = afwImage.ExposureF(model_image, wcs=exposure.getWcs())
-
-        return pipeBase.Struct(crowdedFieldCat=source_catalog,
-                               crowdedFieldResidual=exposure,
-                               crowdedFieldModel=model_exposure)
-
-
+        return source_catalog
