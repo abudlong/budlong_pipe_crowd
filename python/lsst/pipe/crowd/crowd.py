@@ -181,6 +181,13 @@ class CrowdedFieldTask(pipeBase.PipelineTask):
                                                   self.simultaneousPsfFlux_key)
 
             model_exposure = afwImage.ExposureF(model_image, wcs=exposure.getWcs())
+            # Carry over the input's metadata, so the stored model has the
+            # same filter label as its data ID (and a PSF, calibration, ...).
+            model_exposure.setFilter(exposure.getFilter())
+            model_exposure.setPhotoCalib(exposure.getPhotoCalib())
+            model_exposure.setPsf(exposure.getPsf())
+            model_exposure.setDetector(exposure.getDetector())
+            model_exposure.info.setVisitInfo(exposure.info.getVisitInfo())
 
         return pipeBase.Struct(crowdedFieldCat=source_catalog,
                                crowdedFieldResidual=exposure,
